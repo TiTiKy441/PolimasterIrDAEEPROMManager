@@ -80,7 +80,7 @@ namespace PolimasterIrDAEEPROMManager
             }
         }
 
-        public async Task<byte[]> SendAndReceiveAndCheckAsync(byte[] send, byte[] check, CancellationToken cancellationToken)
+        protected async Task<byte[]> SendAndReceiveAndCheckAsync(byte[] send, byte[] check, CancellationToken cancellationToken)
         {
             ThrowIfDisposed();
             byte[] bytes = await SendAndReceiveAsync(send, cancellationToken);

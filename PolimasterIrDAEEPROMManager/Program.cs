@@ -1,29 +1,145 @@
 ﻿using InTheHand.Net;
 using InTheHand.Net.Sockets;
 using System.CommandLine;
-using System.CommandLine.Parsing;
+using System.IO;
 
 namespace PolimasterIrDAEEPROMManager
 {
     internal class Program
     {
 
-        private static CancellationTokenSource _cancellationTokenSource = new();
-
-        private static Dictionary<string, byte[]> CommunicationCommands = new()
-        {
-            { "SetAddress", new byte[] { 130, 0, 10, 177, 0, 114, 0, 5, 0, 0 } },
-            { "ReadBytes", new byte[] { 131, 0, 5, 177, 156} },
-            { "WriteBytes", new byte[] { 130, 0, 10, 177, 156, 114, 0, 5, 0, 0 } },
-            { "Ok3", new byte[] { 160, 0, 3 } },
-            { "Ok4", new byte[] { 160, 0, 8, 114, 0, 5 } },
-        };
+        private readonly static CancellationTokenSource _cancellationTokenSource = new();
 
         static async Task Main(string[] args)
         {
             Console.WriteLine("PolimasterIrDAEEPROMManager is licensed under a modified version of the MIT License");
             Console.WriteLine("You should received a copy of the license with this project");
 
+            RootCommand rootCommand = GetRootCommand();
+            
+            ParseResult parseResult = rootCommand.Parse(args);
+            await parseResult.InvokeAsync();
+
+            // Help command or error; do not continue
+            if ((parseResult.Action?.GetType() == typeof(System.CommandLine.Help.HelpAction)) || parseResult.Errors.Count > 0)
+            {
+                return;
+            }
+
+            ushort start = parseResult.GetValue<ushort>("--start");
+            ushort end = parseResult.GetValue<ushort>("--end");
+            Operation operation = parseResult.GetValue<Operation>("--operation");
+            FileInfo? file = parseResult.GetValue<FileInfo>("--file");
+
+            // (Redundant) check.
+            if ((file is null))
+            {
+                return;
+            }
+
+            Console.WriteLine("start address: {0} ; end address: {1} ; operation: {2} ; file: {3}", start, end, GetOperationAsString(operation), file.Name);
+
+            AppDomain.CurrentDomain.ProcessExit += ProgramExitEvent;
+
+            IrDAClient irDAClient = new IrDAClient();
+            IrDADeviceInfo? foundDevice = null;
+            Console.WriteLine("done: begin continuous scan for IrDA devices...");
+            while (foundDevice == null)
+            {
+                foundDevice = DiscoverOneDevice(irDAClient);
+                await Task.Delay(100);
+            }
+            Console.WriteLine("done: device found!");
+            try
+            {
+                using (DeviceWithMemoryAccess device = new DeviceWithMemoryAccess(irDAClient, new IrDAEndPoint(foundDevice.DeviceAddress, foundDevice.DeviceName)))
+                {
+                    switch (operation)
+                    {
+                        case Operation.Read:
+                            using (FileStream stream = file.OpenWrite())
+                            {
+                                stream.SetLength(0);
+                                for (ushort i = start; (i < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); i += 2)
+                                {
+                                    Console.Title = string.Format("reading [{0}/{1}]... ", i, end);
+                                    byte[] read1 = await device.ReadBytesFromEEPROM(i, _cancellationTokenSource.Token);
+                                    await stream.WriteAsync(read1, 0, read1.Length);
+                                    await stream.FlushAsync();
+                                }
+                                Console.WriteLine("done: output to file {0}", file);
+                            }
+                            break;
+
+                        case Operation.Write:
+                            byte[] read2 = new byte[end - start];
+                            using (FileStream stream = file.OpenRead())
+                            {
+                                await stream.WriteAsync(read2, _cancellationTokenSource.Token);
+                            }
+
+                            for (ushort memAddr = start, i = 0; (memAddr < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); memAddr += 2, i += 2)
+                            {
+                                Console.Title = string.Format("writing [{0}/{1}]...", i, end - start);
+                                await device.WriteBytesToEEPROM(memAddr, read2[i], read2[i + 1], _cancellationTokenSource.Token);
+                            }
+                            break;
+
+                        case Operation.Verify:
+                            byte[] read3 = new byte[end - start];
+                            using (FileStream stream = file.OpenRead())
+                            {
+                                await stream.ReadExactlyAsync(read3, _cancellationTokenSource.Token);
+                            }
+
+                            uint errCount = 0;
+                            for (ushort memAddr = start, i = 0; (memAddr < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); memAddr += 2, i += 2)
+                            {
+                                Console.Title = string.Format("verifying [{0}/{1}]...", i, end - start);
+                                byte[] mem = await device.ReadBytesFromEEPROM(memAddr, _cancellationTokenSource.Token);
+                                if (mem[0] != read3[i])
+                                {
+                                    Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", memAddr, read3[i], mem[0]);
+                                    errCount += 1;
+                                }
+                                if (mem[1] != read3[i + 1])
+                                {
+                                    Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", memAddr + 1, read3[i + 1], mem[0 + 1]);
+                                    errCount += 1;
+                                }
+                            }
+                            break;
+                    }
+                }
+            }
+            catch(Exception e)
+            {
+                Console.Error.WriteLine("fail: operation failed: {0}", e.Message);
+            }
+            
+            Console.Title = "done";
+            Console.WriteLine("done: operation executed");
+        }
+
+
+        private static void ProgramExitEvent(object? sender, EventArgs e)
+        {
+            _cancellationTokenSource.Cancel();
+        }
+
+        private static IrDADeviceInfo? DiscoverOneDevice(IrDAClient client)
+        {
+            IrDADeviceInfo[] irdaDiscoveredInfo = client.DiscoverDevices(1);
+            if (irdaDiscoveredInfo.Length == 0) return null;
+            else return irdaDiscoveredInfo[0];
+        }
+
+        /// <summary>
+        /// Generates a new root command with all options, validators and parsers already added
+        /// </summary>
+        /// <returns>Generated root command</returns>
+        private static RootCommand GetRootCommand()
+        {
             Option<ushort> startArgument = new Option<ushort>("--start")
             {
                 Description = "Operation's start address",
@@ -38,14 +154,49 @@ namespace PolimasterIrDAEEPROMManager
                 DefaultValueFactory = parseResult => 1024,
                 Required = true,
             };
+            endArgument.Validators.Add(result =>
+            {
+                try
+                {
+                    ushort sArg = result.GetValue(startArgument);
+                    ushort eArg = result.GetValue(endArgument);
+                    if (eArg <= sArg)
+                    {
+                        result.AddError("Must be bigger than start address");
+                    }
+                }catch(Exception e)
+                {
+                    result.AddError(string.Format("Exception while validating: {0}", e.Message));
+                }
+            });
             endArgument.Aliases.Add("-e");
 
-            // Cant parse chars
-            Option<string> operationArgument = new Option<string>("--operation")
+            Option<Operation> operationArgument = new Option<Operation>("--operation")
             {
                 Description = "Type of operation to execute, r for read, w for write, v for verify",
-                DefaultValueFactory = parseResult => "r",
+                DefaultValueFactory = parseResult => Operation.Read,
                 Required = true,
+                CustomParser = result =>
+                {
+                    if ((result.Tokens.Count != 1) && (result.Tokens[0].Value.Length != 1))
+                    {
+                        result.AddError("Must be single character");  
+                    };
+                    char v = result.Tokens[0].Value[0];
+                    Operation? op = v switch
+                    {
+                        'r' => Operation.Read,
+                        'w' => Operation.Write,
+                        'v' => Operation.Verify,
+                        _ => null
+                    };
+                    if (op is null)
+                    {
+                        result.AddError("Not a valid operation");
+                        return 0;
+                    }
+                    return (Operation)op;
+                },
             };
             operationArgument.Aliases.Add("-o");
 
@@ -55,6 +206,31 @@ namespace PolimasterIrDAEEPROMManager
                 DefaultValueFactory = parseResult => new FileInfo("eeprom_dump.hex"),
                 Required = true,
             };
+            fileArgument.Validators.Add(result =>
+            {
+                try
+                {
+                    FileInfo? file = result.GetValue(fileArgument);
+                    Operation op = result.GetValue(operationArgument);
+                    if (file is null)
+                    {
+                        result.AddError("Must be a file");
+                        return;
+                    }
+                    if (((op == Operation.Write) || (op == Operation.Verify)) && (!file.Exists))
+                    {
+                        result.AddError("File must exist for this type of operation");
+                    }
+                    if ((op == Operation.Read) && file.IsReadOnly)
+                    {
+                        result.AddError("File must be writable for this type of operation");
+                    }
+                }
+                catch(Exception e)
+                {
+                    result.AddError(string.Format("Unable to validate: {0}", e.Message));
+                }
+            });
             fileArgument.Aliases.Add("-f");
 
             RootCommand rootCommand = new("Utility for reading/writing/verifying EEPROM contents of the Polimaster's PM1703 and PM1401 series radiation pagers")
@@ -65,149 +241,28 @@ namespace PolimasterIrDAEEPROMManager
                 fileArgument,
             };
 
-            ParseResult parseResult = rootCommand.Parse(args);
-            await parseResult.InvokeAsync();
+            return rootCommand;
+        }
 
-            if (parseResult.Action?.GetType() == typeof(System.CommandLine.Help.HelpAction))
+        private static string GetOperationAsString(Operation op)
+        {
+            return op switch
             {
-                return;
-            }
-
-            if (parseResult.Errors.Count != 0)
-            {
-                foreach (ParseError error in parseResult.Errors)
-                {
-                    Console.WriteLine("fail: Unable to parse options: {0}", error.Message);
-                }
-                Exit("Errors while parsing options", 29);
-            }
-
-            ushort start = parseResult.GetValue(startArgument);
-            ushort end = parseResult.GetValue(endArgument);
-            char operation = parseResult.GetValue(operationArgument).FirstOrDefault();
-            string file = parseResult.GetValue(fileArgument).FullName;
-
-            if ((operation != 'r') && (operation != 'w') && (operation != 'v')) Exit(string.Format("Unknown operation type: {0}", operation), 30);
-
-            if (end <= start) Exit(string.Format("End address is smaller or equals to the start address"), 31);
-
-            byte[] fileContents = Array.Empty<byte>();
-            if ((operation == 'w') || (operation == 'v'))
-            {
-                try
-                {
-                    fileContents = File.ReadAllBytes(file);
-                }
-                catch (Exception e)
-                {
-                    Exit(string.Format("Unable to read file: {0}", e.Message), 32);
-                }
-            }
-
-            AppDomain.CurrentDomain.ProcessExit += ProgramExitEvent;
-
-            IrDAClient irDAClient = new IrDAClient();
-            IrDADeviceInfo? foundDevice = null;
-            Console.WriteLine("done: begin continuous scan for IrDA devices...");
-            while (foundDevice == null)
-            {
-                foundDevice = DiscoverOneDevice(irDAClient);
-                await Task.Delay(100);
-            }
-            Console.WriteLine("done: device found!");
-
-            IrDADevice device = new IrDADevice(irDAClient, new IrDAEndPoint(foundDevice.DeviceAddress, foundDevice.DeviceName));
-
-            switch (operation)
-            {
-                case 'r':
-                    File.WriteAllText(file, string.Empty);
-                    for (ushort i = start; (i < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); i += 2)
-                    {
-                        Console.Title = string.Format("reading [{0}/{1}]... ", i, end);
-                        await SetAddress(device, i);
-                        byte[] read = await ReadBytes(device);
-                        await File.AppendAllBytesAsync(file, read, _cancellationTokenSource.Token);
-                    }
-                    Console.WriteLine("done: output to file {0}", file);
-                    break;
-
-                case 'w':
-                    for (ushort i = start; (i < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); i += 2)
-                    {
-                        Console.Title = string.Format("writing [{0}/{1}]...", i, end);
-                        await SetAddress(device, i);
-                        await WriteBytes(device, fileContents[i], fileContents[i + 1]);
-                    }
-                    break;
-
-                case 'v':
-                    uint errCount = 0;
-                    for (ushort i = start; (i < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); i += 2)
-                    {
-                        Console.Title = string.Format("verifying [{0}/{1}]...", i, end);
-                        await SetAddress(device, i);
-                        byte[] read = await ReadBytes(device);
-                        if (read[0] != fileContents[i])
-                        {
-                            Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", i, fileContents[i], read[0]);
-                            errCount += 1;
-                        }
-                        if (read[1] != fileContents[i + 1])
-                        {
-                            Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", i + 1, fileContents[i + 1], read[1]);
-                            errCount += 1;
-                        }
-                    }
-                    Console.WriteLine("done: verified: {0} errors", errCount);
-                    break;
-
-            }
-            Console.Title = "done";
-            Console.WriteLine("done: operation done");
-            device.Close();
-            device.Dispose();
+                Operation.Read => "read",
+                Operation.Write => "write",
+                Operation.Verify => "verify",
+                _ => throw new ArgumentException()
+            };
         }
 
-        private async static Task SetAddress(IrDADevice device, ushort address)
+        /// <summary>
+        /// Type of operation to execute
+        /// </summary>
+        public enum Operation
         {
-            byte[] array = CommunicationCommands["SetAddress"].ToArray();
-            array[8] = (byte)address;
-            array[9] = (byte)(address >> 8);
-            _ = await device.SendAndReceiveAndCheckAsync(array, CommunicationCommands["Ok3"], _cancellationTokenSource.Token);
-        }
-
-        private async static Task<byte[]> ReadBytes(IrDADevice device)
-        {
-            byte[] array = await device.SendAndReceiveAndCheckAsync(CommunicationCommands["ReadBytes"], CommunicationCommands["Ok4"], _cancellationTokenSource.Token);
-            return new byte[2] { array[6], array[7] };
-        }
-
-        private async static Task WriteBytes(IrDADevice device, byte b1, byte b2)
-        {
-            byte[] array = CommunicationCommands["WriteBytes"].ToArray();
-            array[8] = b1;
-            array[9] = b2;
-            _ = await device.SendAndReceiveAndCheckAsync(array, CommunicationCommands["Ok3"], _cancellationTokenSource.Token);
-        }
-
-        private static void ProgramExitEvent(object? sender, EventArgs e)
-        {
-            _cancellationTokenSource.Cancel();
-        }
-
-        private static void Exit(string logMessage, int exitCode)
-        {
-            Console.WriteLine("fail: {0}", logMessage);
-            Console.WriteLine("exiting...");
-            Environment.Exit(exitCode);
-        }
-
-        private static IrDADeviceInfo? DiscoverOneDevice(IrDAClient client)
-        {
-            IrDADeviceInfo[] irdaDiscoveredInfo = client.DiscoverDevices(1);
-            if (irdaDiscoveredInfo.Length == 0) return null;
-            else return irdaDiscoveredInfo[0];
+            Read,
+            Write,
+            Verify,
         }
     }
 }
