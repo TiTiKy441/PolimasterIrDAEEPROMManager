@@ -52,4 +52,5 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
-PolimasterIrDAEEPROMManager/Properties/PublishProfiles/FolderProfile.pubxml.user
+
+*.user
