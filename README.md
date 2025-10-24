@@ -1,5 +1,5 @@
 # PolimasterIrDAEEPROMManager
-Utility for reading/writing/verifying EEPROM contents of the Polimaster's PM1703 and PM1401 series radiation pagers via an infrared port
+Utility for reading/writing/verifying EEPROM contents of the Polimaster's radiation pagers via an infrared port
 
 ## How to use
 ```
