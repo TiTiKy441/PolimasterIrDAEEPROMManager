@@ -46,3 +46,8 @@ PM1208 watches are not supported and never will be
 `R` - read data 
 
 If device have not responded (status `W`) withing 500 ms, will attempt to send data again and wait for the response, will attempt to resend it two times and then raise a timeout exception
+
+## Premade commands
+`PolimasterIrDAEEPROMManager -s 0 -e 8192` - to dump PM1401 or PM1703 (?) memory
+
+`PolimasterIrDAEEPROMManager -s 0 -e 8192 --reverse-addresses` - to dump PM1603,PM1621,... memory
