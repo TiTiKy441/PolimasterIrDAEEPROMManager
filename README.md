@@ -1,6 +1,9 @@
 # PolimasterIrDAEEPROMManager
 Utility for reading/writing/verifying EEPROM contents of the Polimaster's radiation pagers via an infrared port
 
+## Download executable
+If you are here just to download the win10x64 exe: [Click here](https://github.com/TiTiKy441/PolimasterIrDAEEPROMManager/releases/download/latest/win-x64-self-contained.zip)
+
 ## How to use
 ```
 Description:
