@@ -1,7 +1,6 @@
 ﻿using InTheHand.Net;
 using InTheHand.Net.Sockets;
 using System.CommandLine;
-using System.IO;
 
 namespace PolimasterIrDAEEPROMManager
 {
@@ -30,14 +29,19 @@ namespace PolimasterIrDAEEPROMManager
             ushort end = parseResult.GetValue<ushort>("--end");
             Operation operation = parseResult.GetValue<Operation>("--operation");
             FileInfo? file = parseResult.GetValue<FileInfo>("--file");
+            bool erase = parseResult.GetValue<bool>("--erase");
+            bool reverseAddresses = parseResult.GetValue<bool>("--reverse-addresses");
+            bool debugIrda = parseResult.GetValue<bool>("--debug-irda");
 
             // (Redundant) check.
-            if ((file is null))
+            if (file is null)
             {
                 return;
             }
 
-            Console.WriteLine("start address: {0} ; end address: {1} ; operation: {2} ; file: {3}", start, end, GetOperationAsString(operation), file.Name);
+            Console.WriteLine("start address: {0} ; end address: {1} ; operation: {2} ; file: {3} ; erase file: {4} ; reverse addresses: {5} ; debug irda: {6}", start, end, GetOperationAsString(operation), file.Name, erase, reverseAddresses, debugIrda);
+
+            IrDADevice.PrintDebugInfo = debugIrda;
 
             AppDomain.CurrentDomain.ProcessExit += ProgramExitEvent;
 
@@ -52,20 +56,29 @@ namespace PolimasterIrDAEEPROMManager
             Console.WriteLine("done: device found!");
             try
             {
-                using (DeviceWithMemoryAccess device = new DeviceWithMemoryAccess(irDAClient, new IrDAEndPoint(foundDevice.DeviceAddress, foundDevice.DeviceName)))
+                using (IEEPROMAccessDevice device = new EEPROMAccessDevice(irDAClient, new IrDAEndPoint(foundDevice.DeviceAddress, foundDevice.DeviceName), reverseAddresses))
                 {
+                    Console.WriteLine("done: operation starting...");
                     switch (operation)
                     {
                         case Operation.Read:
                             using (FileStream stream = file.OpenWrite())
                             {
-                                stream.SetLength(0);
+                                if (erase) stream.SetLength(0);
+                                else stream.Seek(0, SeekOrigin.End);
                                 for (ushort i = start; (i < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); i += 2)
                                 {
-                                    Console.Title = string.Format("reading [{0}/{1}]... ", i, end);
-                                    byte[] read1 = await device.ReadBytesFromEEPROM(i, _cancellationTokenSource.Token);
-                                    await stream.WriteAsync(read1, 0, read1.Length);
-                                    await stream.FlushAsync();
+                                    try
+                                    {
+                                        Console.Title = string.Format("reading [{0}/{1}]... ", i, end);
+                                        byte[] read1 = await device.ReadBytesFromEEPROM(i, _cancellationTokenSource.Token);
+                                        await stream.WriteAsync(read1);
+                                        await stream.FlushAsync();
+                                    }
+                                    catch (Exception e)
+                                    {
+                                        Console.WriteLine("fail: read failed at {0}; exception: {1}", i, e.Message);
+                                    }
                                 }
                                 Console.WriteLine("done: output to file {0}", file);
                             }
@@ -80,8 +93,15 @@ namespace PolimasterIrDAEEPROMManager
 
                             for (ushort memAddr = start, i = 0; (memAddr < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); memAddr += 2, i += 2)
                             {
-                                Console.Title = string.Format("writing [{0}/{1}]...", i, end - start);
-                                await device.WriteBytesToEEPROM(memAddr, read2[i], read2[i + 1], _cancellationTokenSource.Token);
+                                try
+                                {
+                                    Console.Title = string.Format("writing [{0}/{1}]...", i, end - start);
+                                    await device.WriteBytesToEEPROMAsync(memAddr, read2[i], read2[i + 1], _cancellationTokenSource.Token);
+                                }
+                                catch(Exception e)
+                                {
+                                    Console.WriteLine("fail: write failed {0}; exception: {1}", memAddr, e.Message);
+                                }
                             }
                             break;
 
@@ -95,19 +115,30 @@ namespace PolimasterIrDAEEPROMManager
                             uint errCount = 0;
                             for (ushort memAddr = start, i = 0; (memAddr < end) && (!_cancellationTokenSource.Token.IsCancellationRequested); memAddr += 2, i += 2)
                             {
-                                Console.Title = string.Format("verifying [{0}/{1}]...", i, end - start);
-                                byte[] mem = await device.ReadBytesFromEEPROM(memAddr, _cancellationTokenSource.Token);
-                                if (mem[0] != read3[i])
+                                try
                                 {
-                                    Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", memAddr, read3[i], mem[0]);
-                                    errCount += 1;
+                                    Console.Title = string.Format("verifying [{0}/{1}]...", i, end - start);
+                                    byte[] mem = await device.ReadBytesFromEEPROM(memAddr, _cancellationTokenSource.Token);
+                                    if (mem[0] != read3[i])
+                                    {
+                                        Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", memAddr, read3[i], mem[0]);
+                                        errCount += 1;
+                                    }
+                                    if (mem[1] != read3[i + 1])
+                                    {
+                                        Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", memAddr + 1, read3[i + 1], mem[0 + 1]);
+                                        errCount += 1;
+                                    }
                                 }
-                                if (mem[1] != read3[i + 1])
+                                catch(Exception e)
                                 {
-                                    Console.WriteLine("fail: verification error: address {0}, expected {1}, got {2}", memAddr + 1, read3[i + 1], mem[0 + 1]);
-                                    errCount += 1;
+                                    Console.WriteLine("fail: verification failed {0}; exception: {1}", memAddr, e.Message);
                                 }
                             }
+                            break;
+
+                        default:
+                            Console.WriteLine("fail: unknown operation");
                             break;
                     }
                 }
@@ -140,26 +171,26 @@ namespace PolimasterIrDAEEPROMManager
         /// <returns>Generated root command</returns>
         private static RootCommand GetRootCommand()
         {
-            Option<ushort> startArgument = new Option<ushort>("--start")
+            Option<ushort> startOption = new Option<ushort>("--start")
             {
                 Description = "Operation's start address",
                 DefaultValueFactory = parseResult => 0,
                 Required = true,
             };
-            startArgument.Aliases.Add("-s");
+            startOption.Aliases.Add("-s");
 
-            Option<ushort> endArgument = new Option<ushort>("--end")
+            Option<ushort> endOption = new Option<ushort>("--end")
             {
                 Description = "Operation's end address",
                 DefaultValueFactory = parseResult => 1024,
                 Required = true,
             };
-            endArgument.Validators.Add(result =>
+            endOption.Validators.Add(result =>
             {
                 try
                 {
-                    ushort sArg = result.GetValue(startArgument);
-                    ushort eArg = result.GetValue(endArgument);
+                    ushort sArg = result.GetValue(startOption);
+                    ushort eArg = result.GetValue(endOption);
                     if (eArg <= sArg)
                     {
                         result.AddError("Must be bigger than start address");
@@ -169,18 +200,19 @@ namespace PolimasterIrDAEEPROMManager
                     result.AddError(string.Format("Exception while validating: {0}", e.Message));
                 }
             });
-            endArgument.Aliases.Add("-e");
+            endOption.Aliases.Add("-e");
 
-            Option<Operation> operationArgument = new Option<Operation>("--operation")
+            Option<Operation> operationOption = new Option<Operation>("--operation")
             {
                 Description = "Type of operation to execute, r for read, w for write, v for verify",
                 DefaultValueFactory = parseResult => Operation.Read,
                 Required = true,
                 CustomParser = result =>
                 {
-                    if ((result.Tokens.Count != 1) && (result.Tokens[0].Value.Length != 1))
+                    if ((result.Tokens.Count != 1) || (result.Tokens[0].Value.Length != 1))
                     {
-                        result.AddError("Must be single character");  
+                        result.AddError("Must be single character");
+                        return 0;
                     };
                     char v = result.Tokens[0].Value[0];
                     Operation? op = v switch
@@ -198,20 +230,20 @@ namespace PolimasterIrDAEEPROMManager
                     return (Operation)op;
                 },
             };
-            operationArgument.Aliases.Add("-o");
+            operationOption.Aliases.Add("-o");
 
-            Option<FileInfo> fileArgument = new Option<FileInfo>("--file")
+            Option<FileInfo> fileOption = new Option<FileInfo>("--file")
             {
                 Description = "Output/input file",
                 DefaultValueFactory = parseResult => new FileInfo("eeprom_dump.hex"),
                 Required = true,
             };
-            fileArgument.Validators.Add(result =>
+            fileOption.Validators.Add(result =>
             {
                 try
                 {
-                    FileInfo? file = result.GetValue(fileArgument);
-                    Operation op = result.GetValue(operationArgument);
+                    FileInfo? file = result.GetValue(fileOption);
+                    Operation op = result.GetValue(operationOption);
                     if (file is null)
                     {
                         result.AddError("Must be a file");
@@ -231,14 +263,35 @@ namespace PolimasterIrDAEEPROMManager
                     result.AddError(string.Format("Unable to validate: {0}", e.Message));
                 }
             });
-            fileArgument.Aliases.Add("-f");
+            fileOption.Aliases.Add("-f");
 
-            RootCommand rootCommand = new("Utility for reading/writing/verifying EEPROM contents of the Polimaster's PM1703 and PM1401 series radiation pagers")
+            Option<bool> eraseFileOption = new Option<bool>("--erase")
             {
-                startArgument,
-                endArgument,
-                operationArgument,
-                fileArgument,
+                Required = false,
+                CustomParser = result => { return true; },
+                Description = "Erases contents of the file before writing EEPROM data to it",
+            };
+            Option<bool> reverseAddressesOption = new Option<bool>("--reverse-addresses")
+            {
+                Required = false,
+                CustomParser = result => { return true; },
+                Description = "Read memory in reverse"
+            };
+            Option<bool> irdaDebug = new Option<bool>("--debug-irda")
+            {
+                Required = false,
+                CustomParser = result => { return true; },
+                Description = "Print irda debug information"
+            };
+            RootCommand rootCommand = new("Utility for reading/writing/verifying EEPROM contents of the Polimaster's radiation pagers")
+            {
+                startOption,
+                endOption,
+                operationOption,
+                fileOption,
+                eraseFileOption,
+                reverseAddressesOption,
+                irdaDebug,
             };
 
             return rootCommand;

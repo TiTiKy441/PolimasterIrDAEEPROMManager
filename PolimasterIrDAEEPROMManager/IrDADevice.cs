@@ -17,6 +17,18 @@ namespace PolimasterIrDAEEPROMManager
 
         private SemaphoreSlim _IOSemaphore = new SemaphoreSlim(1);
 
+        /// <summary>
+        /// Wait for response for this amount of milliseconds
+        /// </summary>
+        public static int ResponseTimeout = 500;
+
+        /// <summary>
+        /// Attempt to resend data this amount of times
+        /// </summary>
+        public static int ResendAttempts = 2;
+
+        public static bool PrintDebugInfo = false;
+
         public IrDADevice(IrDAClient irdaClient, IrDAEndPoint endpoint)
         {
             IrDAClient = irdaClient;
@@ -47,35 +59,62 @@ namespace PolimasterIrDAEEPROMManager
              **/
             try
             {
+                if (PrintDebugInfo) Console.Write("P");
                 await _IOSemaphore.WaitAsync(cancellationToken); // One operation at a time so we are waiting until we are cleared to use
 
+                if (PrintDebugInfo) Console.Write("! C");
                 while (!IrDAClient.Connected)
-                {
-                    await Task.Delay(1);
-                }
-
-                while (IrDAStream.DataAvailable) // Flush the stream if it already had any garbage data in it
-                {
-                    _ = IrDAStream.ReadByte();
-                }
-
-                await IrDAStream.WriteAsync(send, cancellationToken); // Write our data
-
-                List<byte> receive = new List<byte>();
-                while (!IrDAStream.DataAvailable) // Waiting for the response (or for the cancelling), for me takes like 130 ms
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     await Task.Delay(1);
                 }
+
+                if (PrintDebugInfo) Console.Write("! F");
+                while (IrDAStream.DataAvailable) // Flush the stream if it already had any garbage data in it
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _ = IrDAStream.ReadByte();
+                }
+                if (PrintDebugInfo) Console.Write("! S");
+
+                await IrDAStream.WriteAsync(send, cancellationToken); // Write our data
+
+                if (PrintDebugInfo) Console.Write("! W");
+                List<byte> receive = new List<byte>();
+                int elapsed = 0;
+                int resendAttempt = 0;
+                while (!IrDAStream.DataAvailable) // Waiting for the response (or for the cancelling), for me takes like 130 ms
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await Task.Delay(1); // DataAvailable is slow, so the delay here works very good at reducing CPU usage
+                    elapsed++;
+                    if (elapsed >= ResponseTimeout)
+                    {
+                        if (resendAttempt == ResendAttempts)
+                        {
+                            throw new TimeoutException(string.Format("No response from device after {0} attemps", resendAttempt));
+                        }
+                        elapsed = 0;
+                        resendAttempt++;
+                        if (PrintDebugInfo) Console.Write("! S");
+                        await IrDAStream.WriteAsync(send, cancellationToken);
+                        if (PrintDebugInfo) Console.Write("!({0}) W", resendAttempt);
+                    }
+                }
+                if (PrintDebugInfo) Console.Write("! R");
+
                 while (IrDAStream.DataAvailable) // Reading data byte by byte
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     receive.Add((byte)IrDAStream.ReadByte());
                 }
+                if (PrintDebugInfo) Console.Write("!({0})", receive.Count);
+
                 return receive.ToArray();
             }
             finally
             {
+                if (PrintDebugInfo) Console.WriteLine();
                 _IOSemaphore.Release();
             }
         }

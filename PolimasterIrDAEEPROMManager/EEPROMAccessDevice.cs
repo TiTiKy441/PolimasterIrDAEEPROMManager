@@ -1,9 +1,9 @@
-﻿using InTheHand.Net;
-using InTheHand.Net.Sockets;
+﻿using InTheHand.Net.Sockets;
+using InTheHand.Net;
 
 namespace PolimasterIrDAEEPROMManager
 {
-    internal class DeviceWithMemoryAccess : IrDADevice
+    internal class EEPROMAccessDevice : IrDADevice, IEEPROMAccessDevice
     {
 
         private readonly static Dictionary<string, byte[]> _communicationCommands = new()
@@ -15,12 +15,16 @@ namespace PolimasterIrDAEEPROMManager
             { "Ok4", new byte[] { 160, 0, 8, 114, 0, 5 } },
         };
 
-        public DeviceWithMemoryAccess(IrDAClient irdaClient, IrDAEndPoint endpoint) : base(irdaClient, endpoint)
+        public bool ReverseAddresses { get; private set; } = false;
+
+        public EEPROMAccessDevice(IrDAClient irdaClient, IrDAEndPoint endpoint, bool reverseAddresses = false) : base(irdaClient, endpoint)
         {
+            ReverseAddresses = reverseAddresses;
         }
 
         private async Task SetAddress(ushort address, CancellationToken token)
         {
+            if (ReverseAddresses) address = (ushort)(ushort.MaxValue - address);
             byte[] array = _communicationCommands["SetAddress"].ToArray();
             array[8] = (byte)address;
             array[9] = (byte)(address >> 8);
@@ -47,7 +51,7 @@ namespace PolimasterIrDAEEPROMManager
             return await ReadBytes(token);
         }
 
-        public async Task WriteBytesToEEPROM(ushort address, byte b1, byte b2, CancellationToken token)
+        public async Task WriteBytesToEEPROMAsync(ushort address, byte b1, byte b2, CancellationToken token)
         {
             await SetAddress(address, token);
             await WriteBytes(b1, b2, token);
